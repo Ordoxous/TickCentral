@@ -105,14 +105,16 @@ minecraft {
     }
 }
 
-task installToObfServer << {
-    delete fileTree('run_server_obf/mods') {
-        include "$archivesBaseName*"
-    }
-    println("Copying " + jar.archivePath + " into run_server_obf/mods")
-    copy {
-        from jar.archivePath
-        into "run_server_obf/mods"
+task installToObfServer {
+    doLast {
+        delete fileTree('run_server_obf/mods') {
+            include "$archivesBaseName*"
+        }
+        println("Copying " + jar.archivePath + " into run_server_obf/mods")
+        copy {
+            from jar.archivePath
+            into "run_server_obf/mods"
+        }
     }
 }
 

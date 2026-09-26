@@ -10,6 +10,7 @@ import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.*;
 
+import java.util.*;
 import java.util.AbstractMap;
 import java.util.HashMap;
 import java.util.LinkedList;
@@ -24,9 +25,15 @@ public class BlockTransformer implements IClassTransformer {
 
 	public static Map.Entry<String, String> RANDOM_TICK_METHOD = null;
 	public static Map.Entry<String, String> UPDATE_TICK_METHOD = null;
+	private static final Set<String> PROCESSED = Collections.synchronizedSet(new HashSet<>());
 
 	@Override
 	public byte[] transform(String name, String transformedName, byte[] basicClass) {
+		if (!PROCESSED.add(transformedName)) {
+			TickCentral.LOGGER.debug("[BlockTransformer] Re-entrancy guard BLOCKED: " + transformedName);
+			return basicClass;
+		}
+		TickCentral.LOGGER.info("[BlockTransformer] Processing: " + transformedName + " (PROCESSED set size: " + PROCESSED.size() + ")");
 		try {
 			if (RANDOM_TICK_METHOD == null || UPDATE_TICK_METHOD == null) {
 				/* Find the method to target. We base this off a java Random at the fourth position, and there are two identical methods */
@@ -104,6 +111,18 @@ public class BlockTransformer implements IClassTransformer {
 			ClassNode classNode = new ClassNode();
 			reader.accept(classNode, 0);
 
+			boolean hasBeenProcessed = false;
+			for (MethodNode m : classNode.methods) {
+				if (m.name.equals(TRUE_UPDATE_TICK_NAME) || m.name.equals(TRUE_RANDOM_TICK_NAME)) {
+					hasBeenProcessed = true;
+					break;
+				}
+			}
+			if (hasBeenProcessed) {
+				TickCentral.LOGGER.info("[BlockTransformer] Class " + transformedName + " has already been processed, returning unchanged");
+				return basicClass;
+			}
+
 			MethodNode newRandomTick = null;
 			MethodNode newUpdateTick = null;
 
@@ -112,7 +131,17 @@ public class BlockTransformer implements IClassTransformer {
 					//Skip abstract methods.
 					continue;
 				}
+				if (method.name.equals(TRUE_UPDATE_TICK_NAME) || method.name.equals(TRUE_RANDOM_TICK_NAME)) {
+					//Skip already-processed methods
+					TickCentral.LOGGER.info("[BlockTransformer] Skipping already-renamed method: " + method.name);
+					continue;
+				}
 				if (UPDATE_TICK_METHOD.getKey().equals(method.name) && UPDATE_TICK_METHOD.getValue().equals(method.desc)) {
+					TickCentral.LOGGER.info("[BlockTransformer] Found matching updateTick: " + method.name + " " + method.desc);
+					if (newUpdateTick != null) {
+						TickCentral.LOGGER.warn("[BlockTransformer] ERROR: Found MULTIPLE updateTick methods, skipping this one!");
+						continue;
+					}
 					newUpdateTick = Utilities.CopyMethodAppearanceAndStripOtherFromFinal(method);
 					newUpdateTick.instructions = new InsnList();
 					newUpdateTick.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, "com/github/terminatornl/tickcentral/api/TickHub", "INTERCEPTOR", "Lcom/github/terminatornl/tickcentral/api/TickInterceptor;"));
@@ -126,6 +155,11 @@ public class BlockTransformer implements IClassTransformer {
 					method.name = TRUE_UPDATE_TICK_NAME;
 					dirty = true;
 				} else if (RANDOM_TICK_METHOD.getKey().equals(method.name) && RANDOM_TICK_METHOD.getValue().equals(method.desc)) {
+					TickCentral.LOGGER.info("[BlockTransformer] Found matching randomTick: " + method.name + " " + method.desc);
+					if (newRandomTick != null) {
+						TickCentral.LOGGER.warn("[BlockTransformer] ERROR: Found MULTIPLE randomTick methods, skipping this one!");
+						continue;
+					}
 					newRandomTick = Utilities.CopyMethodAppearanceAndStripOtherFromFinal(method);
 					newRandomTick.instructions = new InsnList();
 					newRandomTick.instructions.add(new FieldInsnNode(Opcodes.GETSTATIC, "com/github/terminatornl/tickcentral/api/TickHub", "INTERCEPTOR", "Lcom/github/terminatornl/tickcentral/api/TickInterceptor;"));
@@ -141,10 +175,41 @@ public class BlockTransformer implements IClassTransformer {
 				}
 			}
 			if (newUpdateTick != null) {
-				classNode.methods.add(newUpdateTick);
+				TickCentral.LOGGER.info("[BlockTransformer] Attempting to add updateTick: " + newUpdateTick.name + " " + newUpdateTick.desc + " (class has " + classNode.methods.size() + " methods)");
+				for (MethodNode m : classNode.methods) {
+					TickCentral.LOGGER.info("[BlockTransformer] Existing method: " + m.name + " " + m.desc);
+				}
+				boolean updateTickExists = false;
+				for (MethodNode m : classNode.methods) {
+					if (m.name.equals(newUpdateTick.name) && m.desc.equals(newUpdateTick.desc)) {
+						updateTickExists = true;
+						TickCentral.LOGGER.warn("[BlockTransformer] Found existing method: " + m.name + " " + m.desc);
+						break;
+					}
+				}
+				if (!updateTickExists) {
+					classNode.methods.add(newUpdateTick);
+					TickCentral.LOGGER.info("[BlockTransformer] Added updateTick method");
+				} else {
+					TickCentral.LOGGER.info("[BlockTransformer] Skipping duplicate updateTick method for: " + className);
+				}
 			}
 			if (newRandomTick != null) {
-				classNode.methods.add(newRandomTick);
+				TickCentral.LOGGER.info("[BlockTransformer] Attempting to add randomTick: " + newRandomTick.name + " " + newRandomTick.desc + " (class has " + classNode.methods.size() + " methods)");
+				boolean randomTickExists = false;
+				for (MethodNode m : classNode.methods) {
+					if (m.name.equals(newRandomTick.name) && m.desc.equals(newRandomTick.desc)) {
+						randomTickExists = true;
+						TickCentral.LOGGER.warn("[BlockTransformer] Found existing method: " + m.name + " " + m.desc);
+						break;
+					}
+				}
+				if (!randomTickExists) {
+					classNode.methods.add(newRandomTick);
+					TickCentral.LOGGER.info("[BlockTransformer] Added randomTick method");
+				} else {
+					TickCentral.LOGGER.info("[BlockTransformer] Skipping duplicate randomTick method for: " + className);
+				}
 			}
 			for (MethodNode method : classNode.methods) {
 				dirty = Utilities.convertTargetInstruction(className, RANDOM_TICK_METHOD.getKey(), RANDOM_TICK_METHOD.getValue(), className, TRUE_RANDOM_TICK_NAME, method.instructions) || dirty;
