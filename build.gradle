@@ -31,7 +31,10 @@ if (taskNames.contains("jar") || taskNames.find {it.toLowerCase().startsWith("pu
 
 String password
 if (taskNames.contains("build") || taskNames.contains("install")){
-    if (System.console() != null) {
+    if (!file("keystore.jks").exists()) {
+        // No keystore in this checkout, so skip the password prompt and build unsigned
+        version = "$version-unsigned"
+    } else if (System.console() != null) {
         password = new String(System.console().readPassword("Keystore password"))
     } else {
         new SwingBuilder().edt {
@@ -144,6 +147,29 @@ task signJar(type: SignJar, dependsOn: jar) {
 
 if (password != null && password.size() > 0) {
     build.dependsOn signJar
+}
+
+// Set modsDir in ~/.gradle/gradle.properties to point at the Minecraft instance's mods folder
+task deployToMods {
+    dependsOn build
+    doLast {
+        if (!project.hasProperty('modsDir')) {
+            throw new GradleException("modsDir is not set, add it to ~/.gradle/gradle.properties")
+        }
+        def modsDir = file(project.property('modsDir'))
+        if (!modsDir.isDirectory()) {
+            throw new GradleException("modsDir does not exist: $modsDir")
+        }
+        delete fileTree(modsDir) {
+            include "$archivesBaseName*.jar"
+        }
+        println("Copying " + jar.archivePath + " into " + modsDir)
+        copy {
+            from jar.archivePath
+            into modsDir
+            rename { "$archivesBaseName-${project.version.toString().replaceAll('-unsigned$', '')}.jar" }
+        }
+    }
 }
 
 installToObfServer.dependsOn build
